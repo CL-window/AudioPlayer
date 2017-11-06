@@ -57,6 +57,9 @@ public interface IMediaPlayer {
     void setOnSeekCompleteListener(OnSeekCompleteListener listener);
 
     interface OnMusicDurationListener {
+        /**
+         * @param duration duration 单位秒
+         */
         void onMusicDuration(IMediaPlayer mp, float duration);
     }
 

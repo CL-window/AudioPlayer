@@ -25,6 +25,7 @@ import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
 
+import slack.cl.com.audioplayer.PrecisionUtil;
 import slack.cl.com.audioplayer.R;
 
 /**
@@ -427,7 +428,7 @@ public class RangeSeekBar extends View {
 
             if (isLeft) {
                 if (mHintText2Draw == null) {
-                    text2Draw = (int) result[0] + "";
+                    text2Draw = formTextByPrecision(result[0]);
                 } else {
                     text2Draw = mHintText2Draw;
                 }
@@ -437,7 +438,7 @@ public class RangeSeekBar extends View {
 
             } else {
                 if (mHintText2Draw == null) {
-                    text2Draw = (int) result[1] + "";
+                    text2Draw = formTextByPrecision(result[1]);
                 } else {
                     text2Draw = mHintText2Draw;
                 }
@@ -608,10 +609,14 @@ public class RangeSeekBar extends View {
         }
     }
 
+    private String formTextByPrecision(float value) {
+        return PrecisionUtil.formTextByPrecision(value);
+    }
+
     //*********************************** SeekBar ***********************************//
 
     public interface OnRangeChangedListener {
-        void onRangeChanged(RangeSeekBar view, float min, float max, boolean isFromUser);
+        void onRangeChanged(RangeSeekBar view, float min, float max, boolean isFromUser, boolean changeFinished);
     }
 
 
@@ -649,9 +654,9 @@ public class RangeSeekBar extends View {
         }
         if (callback != null) {
             if (mSeekBarMode == 2) {
-                callback.onRangeChanged(this, leftSB.currPercent, rightSB.currPercent, false);
+                callback.onRangeChanged(this, leftSB.currPercent, rightSB.currPercent, false, false);
             } else {
-                callback.onRangeChanged(this, leftSB.currPercent, leftSB.currPercent, false);
+                callback.onRangeChanged(this, leftSB.currPercent, leftSB.currPercent, false, false);
             }
         }
         invalidate();
@@ -662,6 +667,11 @@ public class RangeSeekBar extends View {
     }
 
     public void setRange(float min, float max) {
+        leftSB.currPercent = min;
+        if (mSeekBarMode == 2) {
+            rightSB.currPercent = max;
+            rightSB.slide(1.0f);
+        }
         setRules(min, max, reserveCount, cellsCount);
     }
 
@@ -938,7 +948,7 @@ public class RangeSeekBar extends View {
 
                 if (callback != null) {
                     float[] result = getCurrentRange();
-                    callback.onRangeChanged(this, result[0], result[1], true);
+                    callback.onRangeChanged(this, result[0], result[1], true, false);
                 }
                 invalidate();
 
@@ -948,21 +958,6 @@ public class RangeSeekBar extends View {
                 }
                 break;
             case MotionEvent.ACTION_CANCEL:
-                if (mSeekBarMode == 2) {
-                    isShowProgressHint(rightSB, false);
-                }
-                isShowProgressHint(leftSB, false);
-                if (callback != null) {
-                    float[] result = getCurrentRange();
-                    callback.onRangeChanged(this, result[0], result[1], false);
-                }
-
-                //Intercept parent TouchEvent
-                if (getParent() != null) {
-                    getParent().requestDisallowInterceptTouchEvent(true);
-                }
-
-                break;
             case MotionEvent.ACTION_UP:
                 if (mSeekBarMode == 2) {
                     isShowProgressHint(rightSB, false);
@@ -972,7 +967,7 @@ public class RangeSeekBar extends View {
 
                 if (callback != null) {
                     float[] result = getCurrentRange();
-                    callback.onRangeChanged(this, result[0], result[1], false);
+                    callback.onRangeChanged(this, result[0], result[1], true, true);
                 }
 
                 //Intercept parent TouchEvent

@@ -7,6 +7,8 @@ import android.media.AudioTrack;
 import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.support.annotation.NonNull;
 import android.util.Log;
 
@@ -15,8 +17,10 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.HashMap;
+import java.util.Map;
+
+import slack.cl.com.audioplayer.PrecisionUtil;
 
 /**
  * Created by slack
@@ -25,6 +29,14 @@ import java.util.concurrent.Executors;
 
 public class SlackAudioPlayer implements IMediaPlayer {
 
+    /**
+     * 暂时保存 解码出来的时间，
+     * key: 解码出来的时间戳，时间精度
+     * value: 当前这个时间精度下，第一个解码出来的时间戳在缓存文件中的位置
+     */
+    private final Map<String, Long> mTimeMap = new HashMap<>();
+
+    private final static float DEFAULT_TIME_PRECISION = 1000000.0f; // 1000 ms
     private final static int QUEUE_TIME_OUT = 1000000; // 1000 ms
     private final static int DEQUE_TIME_OUT = 5000; // 5 ms
     private String mMusicFilePath;
@@ -32,7 +44,6 @@ public class SlackAudioPlayer implements IMediaPlayer {
 
     private boolean mLoop;
     private float mLeftVolume = 1.0f, mRightVolume = 1.0f;
-    private float mStartPosition, mEndPisition, mCurrentPosition;
     private boolean mExitFlag;
     private boolean mIsPlaying;
     private int mSampleRate = 41100, mChannelCount = AudioFormat.CHANNEL_IN_MONO;
@@ -42,17 +53,32 @@ public class SlackAudioPlayer implements IMediaPlayer {
 
     private ByteBuffer mTempMusicBuffer;
 
-    private int mCurrentReadIndex;
-    private int mCurrentReadSize;
+    /**
+     * 用户选择的是时长，这个需要换一下，时长和文件长度的一个转化！！！
+     */
+    private int mStartPlayIndex = 0;
+    private long mEndPlayIndex = Long.MAX_VALUE;
+    /**
+     * 当前播放到的 在缓存文件中的位置
+     */
+    private long mCurrentReadIndex;
+
+    /**
+     * 读取的文件的总的长度
+     */
+    private long mSumDecodeDataLength;
     /**
      * 需要  1.解码音乐的线程 2.播放音乐的线程
      */
-    private ExecutorService mThreadPool = Executors.newCachedThreadPool();
+    private final Thread mDecodeThread;
+    private final HandlerThread mPlayThread;
+    private final Handler mPlayHandler;
 
-    /**
-     * 总的长度
-     */
-    private int mSumDecodeDataLength;
+    private AudioTrack mAudioTrack;
+    private int mBufferSize = 4096;
+
+    private boolean mHasEndOfStream;
+
 
     private OnPreparedListener mOnPreparedListener;
     private OnCompletionListener mOnCompletionListener;
@@ -63,6 +89,10 @@ public class SlackAudioPlayer implements IMediaPlayer {
         File cache = new File(context.getCacheDir(), "cache.temp");
         cache.deleteOnExit();
         mCacheAccessFile = new RandomAccessFile(cache, "rw");
+        mPlayThread = new HandlerThread("Play_" + System.currentTimeMillis());
+        mPlayThread.start();
+        mDecodeThread = new Thread(mDecodeRunnable);
+        mPlayHandler = new Handler(mPlayThread.getLooper());
     }
 
     @Override
@@ -92,9 +122,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
             throw new IOException("Please setDataSource first");
         }
 
-        // TODO: 17/11/3 test
-        mSumDecodeDataLength = 10000000;
-//        mThreadPool.execute(mDecodeRunnable);
+        mDecodeThread.start();
     }
 
     private Runnable mDecodeRunnable = new Runnable() {
@@ -115,6 +143,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
         MediaExtractor extractor = null;
         MediaCodec decoder = null;
         private void prepareInternal() {
+            mHasEndOfStream = false;
             try {
                 extractor = new MediaExtractor();
                 extractor.setDataSource(mMusicFilePath);
@@ -162,6 +191,16 @@ public class SlackAudioPlayer implements IMediaPlayer {
                     e.printStackTrace();
                 }
             }
+
+
+            mBufferSize = AudioTrack.getMinBufferSize(mSampleRate,
+                    mChannelConfig, mAudioFormat);
+            mTempMusicBuffer = ByteBuffer.allocate(mBufferSize).order(ByteOrder.nativeOrder());
+
+            mAudioTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                    mSampleRate, mChannelConfig, mAudioFormat, mBufferSize,
+                    AudioTrack.MODE_STREAM);
+            mAudioTrack.setStereoVolume(mLeftVolume, mRightVolume);//设置当前音量大小
         }
 
     };
@@ -206,7 +245,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
                 break;
             }
         }
-
+        mHasEndOfStream = true;
     }
 
     private void dequeueOutputBuffers(MediaCodec decoder, boolean endOfStream) {
@@ -271,7 +310,8 @@ public class SlackAudioPlayer implements IMediaPlayer {
     }
 
     private void writeAudioDataToCache(ByteBuffer buffer, MediaCodec.BufferInfo info) {
-        Log.e("slack", "Buffer Capacity: " + buffer.capacity() + "  Info Size: " + info.size);
+        Log.e("slack", "Buffer Capacity: " + buffer.capacity() + "  Info Size: " + info.size +
+                " TimeUs: " + info.presentationTimeUs + " SumData: " + mSumDecodeDataLength);
         ByteBuffer copyBuffer = ByteBuffer.allocate(info.size).order(ByteOrder.nativeOrder());
         buffer.position(info.offset);
         buffer.limit(info.offset + info.size);
@@ -281,7 +321,16 @@ public class SlackAudioPlayer implements IMediaPlayer {
         try {
             mCacheAccessFile.seek(mSumDecodeDataLength);
             mCacheAccessFile.write(copyBuffer.array(), 0, info.size);
+
+            String key = PrecisionUtil.formTextByPrecision(info.presentationTimeUs/DEFAULT_TIME_PRECISION);
+            synchronized (mLock) {
+                if(!mTimeMap.containsKey(key)) {
+                    mTimeMap.put(key, mSumDecodeDataLength);
+                }
+            }
+            Log.i("slack", "Key: " + key);
             mSumDecodeDataLength += info.size;
+
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -293,7 +342,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
      */
     private void obtainMusicDuration(MediaFormat audioFormat) {
         long duration = audioFormat.getLong(MediaFormat.KEY_DURATION);
-        float time = duration / 1000000f;
+        float time = duration / DEFAULT_TIME_PRECISION;
         if(mOnMusicDurationListener != null) {
             mOnMusicDurationListener.onMusicDuration(this, time);
         }
@@ -317,38 +366,31 @@ public class SlackAudioPlayer implements IMediaPlayer {
     @Override
     public void start() {
         mIsPlaying = true;
-        mThreadPool.execute(mPlayRunnable);
+        mPlayHandler.post(mPlayRunnable);
     }
 
     private Runnable mPlayRunnable = new Runnable() {
         @Override
         public void run() {
             try {
-                int bufferSize = AudioTrack.getMinBufferSize(mSampleRate,
-                        mChannelConfig, mAudioFormat);
-                mTempMusicBuffer = ByteBuffer.allocate(bufferSize).order(ByteOrder.nativeOrder());
 
-                AudioTrack track = new AudioTrack(AudioManager.STREAM_MUSIC,
-                        mSampleRate, mChannelConfig, mAudioFormat, bufferSize,
-                        AudioTrack.MODE_STREAM);
-                track.setStereoVolume(mLeftVolume, mRightVolume);//设置当前音量大小
-                // 开始播放
-                track.play();
-                // 由于AudioTrack播放的是流，所以，我们需要一边播放一边读取
+                mAudioTrack.play();
                 while (mIsPlaying) {
-                    getAudioData(bufferSize);
+                    getAudioData(mBufferSize);
                     if (mIsPlaying) {
                         Log.e("slack", "playing...");
                         byte[] data = mTempMusicBuffer.array();
-                        // 然后将数据写入到AudioTrack中
-                        track.write(data, 0, data.length);
+                        mAudioTrack.write(data, 0, data.length);
+                    } else {
+                        if(mOnCompletionListener != null) {
+                            mOnCompletionListener.onCompletion(SlackAudioPlayer.this);
+                        }
                     }
                 }
 
-                // 播放结束
-                track.stop();
+                mAudioTrack.stop();
+                Log.e("slack", "playing finish...");
             } catch (Exception e) {
-                // TODO: handle exception
                 Log.e("slack", "error:" + e.getMessage());
             }
         }
@@ -363,37 +405,78 @@ public class SlackAudioPlayer implements IMediaPlayer {
     ByteBuffer getAudioData(int size) {
 
         synchronized (mLock) {//记得加锁
-//            if (mSumDecodeDataLength == 0) {
-//                Log.e("slack", "Waiting Music Decode product data!");
-//                try {
-//                    mLock.wait(1000);
-//                } catch (InterruptedException e) {
-//                    e.printStackTrace();
-//                }
-//            }
-//
-//            if (mSumDecodeDataLength == 0) {
-//                Log.e("slack", "Error No Music Decode data available!");
-//                return null;
-//            }
+            if (mSumDecodeDataLength == 0) {
+                Log.e("slack", "Waiting Music Decode product data!");
+                try {
+                    mLock.wait(1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            if (mSumDecodeDataLength == 0) {
+                Log.e("slack", "Error No Music Decode data available!");
+                return null;
+            }
 
             try {
                 byte [] arr = mTempMusicBuffer.array();
                 mCacheAccessFile.seek(mCurrentReadIndex);
-                if (mCurrentReadIndex + size <= mSumDecodeDataLength) {
+                long need = mCurrentReadIndex + size;
+                // 正常情况，读取的数据是 已解码的，且在选中播放范围内
+                long end  =  Math.min(mSumDecodeDataLength, mEndPlayIndex);
+                if (need <= end) {
                     mCacheAccessFile.read(arr, 0, size);
                 } else {
-                    if (mLoop) {
-                        /**
-                         * 循环读取, 这里的循环读取是建立在，mSumDecodeDataLength > size 的情况下的
-                         */
-                        int first = mSumDecodeDataLength - mCurrentReadIndex;
-                        mCacheAccessFile.read(arr, 0, first);
-                        mCacheAccessFile.seek(0);
-                        int remain = size - first;
-                        mCacheAccessFile.read(arr, first, remain);
+                    // 不正常情况，
+                    if(mHasEndOfStream) {
+                        // 已经全部解码完成
+                        if (mLoop) {
+                            /**
+                             * 循环读取, 这里的循环读取是建立在，mSumDecodeDataLength > size 的情况下的
+                             */
+                            int first = (int) (end - mCurrentReadIndex);
+                            mCacheAccessFile.read(arr, mStartPlayIndex, first);
+                            mCacheAccessFile.seek(0);
+                            int remain = size - first;
+                            mCacheAccessFile.read(arr, first, remain);
+                        } else {
+                            mIsPlaying = false;
+                        }
                     } else {
-                        mIsPlaying = false;
+                        // 等待咯
+                        /**
+                         * 等待数据
+                         */
+                        try {
+                            mLock.wait(1000);
+                        }
+                        catch (Exception e) {
+                            e.printStackTrace();
+                        }
+
+                        if (need <= end) {
+                            mCacheAccessFile.read(arr);
+                        }
+                        else {
+                            if (mHasEndOfStream) {
+                                /**
+                                 * 循环读取
+                                 */
+                                int first = (int) (mSumDecodeDataLength - mCurrentReadIndex);
+                                mCacheAccessFile.read(arr, 0, first);
+                                mCacheAccessFile.seek(0);
+                                int remain = size - first;
+                                mCacheAccessFile.read(arr, first, remain);
+                            }
+                            else {
+                                /**
+                                 * 如果还没读到，返回null
+                                 */
+                                Log.e("slack", "Error no enough data!");
+                                return null;
+                            }
+                        }
                     }
                 }
 
@@ -407,21 +490,60 @@ public class SlackAudioPlayer implements IMediaPlayer {
         }
     }
 
+    /**
+     * 如果当前在播放，先暂停，调整完成后恢复播放
+     * 这里做了限制，只处理用户滑动完成时 ，滑动过程中不处理
+     */
     @Override
     public void updateRange(float start, float end) {
-        mStartPosition = start;
-        mEndPisition = end;
-        if(end < start) {
-            mEndPisition = start;
+        Log.i("slack", "updateRange， start: " + start + ", end: " + end);
+        boolean playing = mIsPlaying;
+        pause();
+        synchronized (mLock) {
+            String endKey = PrecisionUtil.formTextByPrecision(end);
+            if(mTimeMap.containsKey(endKey)) {
+                // 解码完成了，
+                mEndPlayIndex = mTimeMap.get(endKey);
+            }
+            String startKey = PrecisionUtil.formTextByPrecision(start);
+            if(mTimeMap.containsKey(endKey)) {
+                // 解码完成了，
+                mCurrentReadIndex = mTimeMap.get(startKey);
+                mStartPlayIndex = (int) mCurrentReadIndex;
+            } else {
+                // 用户选取的开始播放的点还没有解析完成，这个就麻烦了，要么让用户等着，要么跳跃着解析音乐
+                try {
+                    mLock.wait(1000);
+                }
+                catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                startKey = PrecisionUtil.formTextByPrecision(start);
+                if(mTimeMap.containsKey(endKey)) {
+                    // 解码完成了，
+                    mCurrentReadIndex = mTimeMap.get(startKey);
+                    mStartPlayIndex = (int) mCurrentReadIndex;
+                } else {
+                    mStartPlayIndex = 0;
+                    mCurrentReadIndex = 0;
+                }
+            }
         }
-        if(mCurrentPosition < start) {
-            mCurrentPosition = start;
+        if(playing) {
+            start();
         }
+
+        Log.i("slack", "updateRange， start: " + start + ", end: " + end + " ,CurrentTime:" + mCurrentReadIndex + " ,EndIndex:" + mEndPlayIndex);
     }
 
     @Override
     public void pause() {
-        mIsPlaying = false;
+        synchronized (mLock) {
+            mIsPlaying = false;
+            mAudioTrack.stop();
+            Log.e("slack", "pause...");
+        }
     }
 
     @Override
@@ -436,19 +558,23 @@ public class SlackAudioPlayer implements IMediaPlayer {
 
     @Override
     public long getCurrentPosition() {
-        return (long) mCurrentPosition;
+        return (long) mCurrentReadIndex;
     }
 
     @Override
     public void release() {
         try {
             mExitFlag = true;
-
             mCacheAccessFile.close();
         }
         catch (Exception e) {
             e.printStackTrace();
         }
+        mTimeMap.clear();
+        mAudioTrack.stop();
+        mAudioTrack.release();
+        mPlayThread.quitSafely();
+        mDecodeThread.interrupt();
     }
 
     @Override

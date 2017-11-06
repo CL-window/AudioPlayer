@@ -39,6 +39,18 @@ public class MainActivity extends AppCompatActivity {
             mMediaPlayer = new SlackAudioPlayer(this);
             mMediaPlayer.setDataSource(music.getAbsolutePath());
             mMediaPlayer.setOnMusicDurationListener(mMusicDurationListener);
+            mMediaPlayer.setOnCompletionListener(new IMediaPlayer.OnCompletionListener() {
+                @Override
+                public void onCompletion(IMediaPlayer mp) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            mIsPlaying = false;
+                            updatePlayInfo();
+                        }
+                    });
+                }
+            });
             mMediaPlayer.prepareAsync();
         } catch (Exception e) {
             e.printStackTrace();
@@ -59,11 +71,9 @@ public class MainActivity extends AppCompatActivity {
 
     private RangeSeekBar.OnRangeChangedListener mOnRangeChangedListener = new RangeSeekBar.OnRangeChangedListener() {
         @Override
-        public void onRangeChanged(RangeSeekBar view, float min, float max, boolean isFromUser) {
-            if(isFromUser) {
-                mMediaPlayer.pause();
+        public void onRangeChanged(RangeSeekBar view, float min, float max, boolean isFromUser, boolean changeFinished) {
+            if(isFromUser && changeFinished) {
                 mMediaPlayer.updateRange(min, max);
-                mMediaPlayer.start();
             }
         }
     };
