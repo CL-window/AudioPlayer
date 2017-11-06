@@ -1,8 +1,11 @@
 package slack.cl.com.audioplayer.player;
 
+import android.support.annotation.IntDef;
 import android.view.Surface;
 
 import java.io.IOException;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /**
  * Created by Kejin on 2017/6/26.
@@ -64,4 +67,18 @@ public interface IMediaPlayer {
     }
 
     void setOnMusicDurationListener(OnMusicDurationListener listener);
+
+    /**
+     * what:
+     * 0x001    :   播放部分还没有解码完成，需要用户等待
+     */
+    int ERROR_NOT_PREPARED = 0x001;
+    @IntDef({ERROR_NOT_PREPARED})
+    @Retention(RetentionPolicy.SOURCE)
+    @interface AudioPlayError {}
+    interface OnErrorListener {
+        void onError(IMediaPlayer mp, @AudioPlayError int what, String msg);
+    }
+
+    void setOnErrorListener(OnErrorListener listener);
 }

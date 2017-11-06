@@ -14,7 +14,11 @@ public class PrecisionUtil {
     private static int mShowValuePrecision = 1;
 
     public static String formTextByPrecision(float value) {
-        int key = (int) Math.pow(10, mShowValuePrecision);
+        return formTextByPrecision(mShowValuePrecision, value);
+    }
+
+    public static String formTextByPrecision(int precision, float value) {
+        int key = (int) Math.pow(10, precision);
         return ((float)(Math.round(value*key))/key) + "";
     }
 }

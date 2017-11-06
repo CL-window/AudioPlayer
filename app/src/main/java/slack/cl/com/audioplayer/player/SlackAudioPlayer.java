@@ -36,6 +36,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
      */
     private final Map<String, Long> mTimeMap = new HashMap<>();
 
+    private final static float ERROR_VALUE = -1;
     private final static float DEFAULT_TIME_PRECISION = 1000000.0f; // 1000 ms
     private final static int QUEUE_TIME_OUT = 1000000; // 1000 ms
     private final static int DEQUE_TIME_OUT = 5000; // 5 ms
@@ -58,6 +59,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
      */
     private int mStartPlayIndex = 0;
     private long mEndPlayIndex = Long.MAX_VALUE;
+    private float mUserEnd = ERROR_VALUE;
     /**
      * 当前播放到的 在缓存文件中的位置
      */
@@ -84,6 +86,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
     private OnCompletionListener mOnCompletionListener;
     private OnSeekCompleteListener mOnSeekCompleteListener;
     private OnMusicDurationListener mOnMusicDurationListener;
+    private OnErrorListener mOnErrorListener;
 
     public SlackAudioPlayer(@NonNull Context context) throws Exception {
         File cache = new File(context.getCacheDir(), "cache.temp");
@@ -109,6 +112,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
     public void setVolume(float left, float right) {
         mLeftVolume = left;
         mRightVolume = right;
+        mAudioTrack.setStereoVolume(mLeftVolume, mRightVolume);
     }
 
     @Override
@@ -416,6 +420,9 @@ public class SlackAudioPlayer implements IMediaPlayer {
 
             if (mSumDecodeDataLength == 0) {
                 Log.e("slack", "Error No Music Decode data available!");
+                if(mOnErrorListener != null) {
+                    mOnErrorListener.onError(this, ERROR_NOT_PREPARED, "Error No Music Decode data available!");
+                }
                 return null;
             }
 
@@ -423,6 +430,14 @@ public class SlackAudioPlayer implements IMediaPlayer {
                 byte [] arr = mTempMusicBuffer.array();
                 mCacheAccessFile.seek(mCurrentReadIndex);
                 long need = mCurrentReadIndex + size;
+                if(mUserEnd == ERROR_VALUE) {
+                    String endKey = PrecisionUtil.formTextByPrecision(mUserEnd);
+                    if(mTimeMap.containsKey(endKey)) {
+                        // 解码完成了，
+                        mEndPlayIndex = mTimeMap.get(endKey);
+                        mUserEnd = ERROR_VALUE;
+                    }
+                }
                 // 正常情况，读取的数据是 已解码的，且在选中播放范围内
                 long end  =  Math.min(mSumDecodeDataLength, mEndPlayIndex);
                 if (need <= end) {
@@ -444,7 +459,6 @@ public class SlackAudioPlayer implements IMediaPlayer {
                             mIsPlaying = false;
                         }
                     } else {
-                        // 等待咯
                         /**
                          * 等待数据
                          */
@@ -455,6 +469,7 @@ public class SlackAudioPlayer implements IMediaPlayer {
                             e.printStackTrace();
                         }
 
+                        end  =  Math.min(mSumDecodeDataLength, mEndPlayIndex);
                         if (need <= end) {
                             mCacheAccessFile.read(arr);
                         }
@@ -474,6 +489,9 @@ public class SlackAudioPlayer implements IMediaPlayer {
                                  * 如果还没读到，返回null
                                  */
                                 Log.e("slack", "Error no enough data!");
+                                if(mOnErrorListener != null) {
+                                    mOnErrorListener.onError(this, ERROR_NOT_PREPARED, "Error no enough data!");
+                                }
                                 return null;
                             }
                         }
@@ -500,13 +518,18 @@ public class SlackAudioPlayer implements IMediaPlayer {
         boolean playing = mIsPlaying;
         pause();
         synchronized (mLock) {
+            // 结束位置，如果没有解码完成，这个暂时先不管，认为时播放到文件最后
+            // TODO: 17/11/6 最好是记住这个结束的位置，然后解码出来后，只播放到这个结束的位置
             String endKey = PrecisionUtil.formTextByPrecision(end);
             if(mTimeMap.containsKey(endKey)) {
                 // 解码完成了，
                 mEndPlayIndex = mTimeMap.get(endKey);
+                mUserEnd = ERROR_VALUE;
+            } else {
+                mUserEnd = end;
             }
             String startKey = PrecisionUtil.formTextByPrecision(start);
-            if(mTimeMap.containsKey(endKey)) {
+            if(mTimeMap.containsKey(startKey)) {
                 // 解码完成了，
                 mCurrentReadIndex = mTimeMap.get(startKey);
                 mStartPlayIndex = (int) mCurrentReadIndex;
@@ -519,12 +542,15 @@ public class SlackAudioPlayer implements IMediaPlayer {
                     e.printStackTrace();
                 }
 
-                startKey = PrecisionUtil.formTextByPrecision(start);
-                if(mTimeMap.containsKey(endKey)) {
+                if(mTimeMap.containsKey(startKey)) {
                     // 解码完成了，
                     mCurrentReadIndex = mTimeMap.get(startKey);
                     mStartPlayIndex = (int) mCurrentReadIndex;
                 } else {
+                    // 等待后还没有完成，暂时处理为从音乐开始处播放
+                    if(mOnErrorListener != null) {
+                        mOnErrorListener.onError(this, ERROR_NOT_PREPARED, "The point need play is not prepare ready");
+                    }
                     mStartPlayIndex = 0;
                     mCurrentReadIndex = 0;
                 }
@@ -595,6 +621,11 @@ public class SlackAudioPlayer implements IMediaPlayer {
     @Override
     public void setOnMusicDurationListener(OnMusicDurationListener listener) {
         mOnMusicDurationListener = listener;
+    }
+
+    @Override
+    public void setOnErrorListener(OnErrorListener listener) {
+        mOnErrorListener = listener;
     }
 
 }
